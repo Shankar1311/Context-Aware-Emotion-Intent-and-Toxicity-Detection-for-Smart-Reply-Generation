@@ -26,6 +26,8 @@ import pandas as pd
 import os
 import json
 from pathlib import Path
+import warnings
+warnings.filterwarnings('ignore')
 
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE CONFIG  (must be first Streamlit call)
@@ -270,10 +272,7 @@ ORIGINAL_TRAINING_DATA = [
 ]
 
 def load_intent_json_dataset(filepath="intent.json"):
-    """
-    Load intent dataset from intent.json (Chatbots dataset)
-    Format: {"intents": [{"intent": "Greeting", "text": ["Hi", "Hello"], ...}]}
-    """
+    """Load intent dataset from intent.json"""
     samples = []
     
     if not os.path.exists(filepath):
@@ -288,21 +287,14 @@ def load_intent_json_dataset(filepath="intent.json"):
         else:
             return samples
         
-        # Intent mapping to our 6 categories
         intent_mapping = {
-            # Greeting related
             "greeting": "greeting", "greetingresponse": "greeting", "courtesygreeting": "greeting",
             "courtesygreetingresponse": "greeting",
-            # Question related
             "namequery": "question", "realnamequery": "question", "timequery": "question",
             "understandquery": "question", "currenthumanquery": "question", "whoami": "question",
-            # Complaint related
             "swearing": "complaint", "shutup": "complaint",
-            # Request related
             "podbaydoor": "request", "podbaydoorresponse": "request",
-            # Statement/Announcement related
             "statement": "statement", "announcement": "statement", "intention": "statement",
-            # General conversation
             "thanks": "general", "goodbye": "general", "courtesygoodbye": "general",
             "jokes": "general", "gossip": "general", "clever": "general", "selfaware": "general",
             "nottalking2u": "general",
@@ -315,7 +307,6 @@ def load_intent_json_dataset(filepath="intent.json"):
             if intent_name and patterns:
                 mapped_intent = intent_mapping.get(intent_name, "general")
                 
-                # Fallback mapping based on keywords
                 if "greeting" in intent_name:
                     mapped_intent = "greeting"
                 elif "query" in intent_name:
@@ -332,13 +323,10 @@ def load_intent_json_dataset(filepath="intent.json"):
         return samples
         
     except Exception as e:
-        st.error(f"Error loading intent.json: {e}")
         return samples
 
 def load_emotions_dataset(train_file="train.txt", test_file="test.txt", val_file="val.txt"):
-    """
-    Load emotions dataset from text files
-    """
+    """Load emotions dataset from text files"""
     samples = []
     
     emotion_to_intent = {
@@ -387,16 +375,12 @@ def load_emotions_dataset(train_file="train.txt", test_file="test.txt", val_file
     return samples
 
 def combine_datasets():
-    """
-    Combine all datasets: original + intent.json + emotions dataset
-    """
+    """Combine all datasets"""
     combined = ORIGINAL_TRAINING_DATA.copy()
     
-    # Load intent.json dataset
     intent_samples = load_intent_json_dataset("intent.json")
     combined.extend(intent_samples)
     
-    # Load emotions dataset
     emotion_samples = load_emotions_dataset("train.txt", "test.txt", "val.txt")
     combined.extend(emotion_samples)
     
@@ -503,22 +487,100 @@ def detect_emotion(text: str, toxicity_score: float = 0.0) -> dict:
 
 @st.cache_resource
 def build_intent_classifier():
+    """Build and train the intent classifier with error handling"""
     texts, labels = zip(*TRAINING_DATA)
-    clf = Pipeline([
-        ("tfidf", TfidfVectorizer(
-            ngram_range=(1, 2), max_features=2000, sublinear_tf=True,
-            strip_accents="unicode", min_df=2,
-        )),
-        ("clf", LogisticRegression(
-            C=1.5, max_iter=500, solver="lbfgs",
-            multi_class="multinomial", class_weight="balanced",
-        )),
-    ])
-    clf.fit(texts, labels)
-    return clf
+    
+    # Ensure we have enough samples
+    if len(texts) < 10:
+        st.error(f"Insufficient training data. Only {len(texts)} samples found.")
+        return None
+    
+    # Check class distribution
+    unique_labels = set(labels)
+    if len(unique_labels) < 2:
+        st.error(f"Need at least 2 intent classes. Found: {unique_labels}")
+        return None
+    
+    # Use only compatible parameters that work across all scikit-learn versions
+    try:
+        # First attempt: Standard parameters that work with most versions
+        clf = Pipeline([
+            ("tfidf", TfidfVectorizer(
+                ngram_range=(1, 2), 
+                max_features=1500,
+                sublinear_tf=True,
+                strip_accents="unicode",
+                min_df=2,
+            )),
+            ("clf", LogisticRegression(
+                C=1.0,
+                max_iter=1000,
+                solver="lbfgs",
+                random_state=42,
+            )),
+        ])
+        
+        clf.fit(texts, labels)
+        
+        # Show training accuracy
+        accuracy = clf.score(texts, labels)
+        st.sidebar.success(f"🎯 Model trained on {len(texts)} samples, Accuracy: {accuracy:.2%}")
+        
+        # Show class distribution
+        from collections import Counter
+        class_counts = Counter(labels)
+        st.sidebar.info(f"📊 Classes: {', '.join([f'{k}({v})' for k,v in class_counts.items()])}")
+        
+        return clf
+        
+    except Exception as e:
+        st.error(f"Error training model: {str(e)}")
+        
+        # Fallback: Even simpler model without class_weight
+        try:
+            st.warning("Retrying with simplified model...")
+            clf = Pipeline([
+                ("tfidf", TfidfVectorizer(
+                    ngram_range=(1, 2), 
+                    max_features=1000,
+                )),
+                ("clf", LogisticRegression(
+                    max_iter=1000,
+                    solver="lbfgs",
+                )),
+            ])
+            clf.fit(texts, labels)
+            accuracy = clf.score(texts, labels)
+            st.sidebar.success(f"🎯 Simplified model trained, Accuracy: {accuracy:.2%}")
+            return clf
+        except Exception as e2:
+            st.error(f"Fallback also failed: {str(e2)}")
+            
+            # Final fallback: Use Naive Bayes which is very stable
+            try:
+                from sklearn.naive_bayes import MultinomialNB
+                st.warning("Using Naive Bayes as final fallback...")
+                clf = Pipeline([
+                    ("tfidf", TfidfVectorizer(
+                        ngram_range=(1, 2), 
+                        max_features=1000,
+                    )),
+                    ("clf", MultinomialNB()),
+                ])
+                clf.fit(texts, labels)
+                accuracy = clf.score(texts, labels)
+                st.sidebar.success(f"🎯 Naive Bayes model trained, Accuracy: {accuracy:.2%}")
+                return clf
+            except Exception as e3:
+                st.error(f"All training attempts failed: {str(e3)}")
+                return None
 
 
 def classify_intent(text: str, clf) -> dict:
+    if clf is None:
+        return {"intent": "general", "label": "General", "emoji": "💬", 
+                "confidence": 0.0, "scores": {}}
+    
     INTENT_META = {
         "greeting": ("👋", "Greeting"),
         "question": ("❓", "Question"),
@@ -585,7 +647,6 @@ def highlight_keywords(text: str, toxic_kws: dict) -> str:
 # =============================================================================
 
 REPLIES = {
-    # Greeting replies
     ("greeting", "positive"): [
         "Hello! 😊 Great to see you in such high spirits! How can I assist you today?",
         "Hey there! You seem to be in a wonderful mood. What can I do for you?",
@@ -599,7 +660,6 @@ REPLIES = {
         "Hello. I'm sorry if things aren't going well. Let me know how I can assist.",
     ],
     
-    # Question replies
     ("question", "positive"): [
         "Great question! 💡 I'd be happy to help. Could you provide a bit more context?",
         "Excellent curiosity! Let me help you find the right answer.",
@@ -613,7 +673,6 @@ REPLIES = {
         "I hear you. Let me do my best to answer and ease your concern.",
     ],
     
-    # Complaint replies
     ("complaint", "positive"): [
         "I'm glad you're staying positive despite the issue! 🙌 Let's resolve it quickly.",
         "Thanks for the constructive tone. We'll get this sorted right away.",
@@ -627,7 +686,6 @@ REPLIES = {
         "I'm truly sorry about this experience. Let me escalate this right away.",
     ],
     
-    # Request replies
     ("request", "positive"): [
         "Absolutely! 😊 I'd be happy to assist with your request. Let's get started.",
         "Sure thing! I'll take care of this for you right away.",
@@ -641,7 +699,6 @@ REPLIES = {
         "I'm sorry for any inconvenience. I'll do my best to fulfil your request right away.",
     ],
     
-    # General replies
     ("general", "positive"): [
         "Sounds wonderful! 🌟 Thanks for sharing. Is there anything else I can do for you?",
         "That's great to hear! Feel free to reach out anytime.",
@@ -655,7 +712,6 @@ REPLIES = {
         "That sounds difficult. If there's anything I can do to help, don't hesitate to ask.",
     ],
     
-    # Statement/Announcement replies
     ("statement", "positive"): [
         "That sounds great! 😊 Let me know if you need any help!",
         "Awesome! I'm here if you need any assistance with that!",
@@ -777,6 +833,10 @@ st.markdown("---")
 
 # Load the model
 clf = build_intent_classifier()
+
+if clf is None:
+    st.error("Failed to load the intent classifier. Please check your training data.")
+    st.stop()
 
 # Input area
 st.markdown("### Enter Your Text")
